@@ -1,16 +1,15 @@
 const express = require('express');
-const OpenAI = require('openai');
+const Groq = require('groq-sdk');
 
 const router = express.Router();
 
-// Initialize OpenAI (check if API key exists)
-let openai = null;
-if (process.env.OPENAI_API_KEY) {
-  openai = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY
-  });
+// Initialize Groq
+let groq = null;
+if (process.env.GROQ_API_KEY) {
+  groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  console.log('✅ Groq AI initialized');
 } else {
-  console.log('⚠️ OPENAI_API_KEY not found - AI features will use mock responses');
+  console.log('⚠️ GROQ_API_KEY not found - using fallback responses');
 }
 
 // Email categories
@@ -29,14 +28,14 @@ const CATEGORIES = {
 router.get('/test', (req, res) => {
   res.json({
     success: true,
-    message: '🤖 AI Agent is working!',
-    features: ['categorize', 'urgency', 'respond', 'process-batch'],
-    openaiStatus: openai ? 'connected' : 'not configured',
+    message: '🤖 Groq AI Agent is working!',
+    groqStatus: groq ? 'connected' : 'not configured',
+    model: 'llama3-8b-8192',
     timestamp: new Date().toISOString()
   });
 });
 
-// Categorize single email
+// Categorize single email with Groq
 router.post('/categorize', async (req, res) => {
   try {
     const { subject, from, snippet, to } = req.body;
@@ -52,39 +51,133 @@ router.post('/categorize', async (req, res) => {
       });
     }
 
-    // If no OpenAI, return mock response
-    if (!openai) {
-      const mockCategory = subject?.toLowerCase().includes('urgent') ? 'urgent' :
-                          subject?.toLowerCase().includes('meeting') ? 'meeting' :
-                          from?.includes('newsletter') ? 'newsletter' : 'work';
-      
+    if (!groq) {
       return res.json({
-        success: true,
-        category: mockCategory,
-        confidence: 0.85,
-        reasoning: 'Mock classification (OpenAI not configured)',
-        processedAt: new Date().toISOString()
+        success: false,
+        error: 'Groq not configured',
+        message: 'Please add GROQ_API_KEY to your .env file'
       });
     }
 
-    const prompt = `
-    Categorize this email into one of these categories: ${Object.values(CATEGORIES).join(', ')}
-    
-    Subject: ${subject || 'No subject'}
-    From: ${from || 'Unknown'}
-    To: ${to || 'Unknown'}
-    Content: ${snippet || 'No content'}
-    
-    Respond with JSON format only:
-    {"category": "category_name", "confidence": 0.95, "reasoning": "brief explanation"}
-    `;
+    const prompt = `Analyze this email and categorize it into one of these categories: ${Object.values(CATEGORIES).join(', ')}
 
-    const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+Email Details:
+Subject: ${subject || 'No subject'}
+From: ${from || 'Unknown'}
+To: ${to || 'Unknown'}
+Content: ${snippet || 'No content'}
+
+Instructions:
+- Consider the context, tone, and urgency level
+- "urgent" should only be used for true emergencies or time-critical items
+- Regular work tasks with deadlines are usually "work" category
+- Be precise in your reasoning
+
+Respond ONLY with valid JSON in this exact format:
+{"category": "category_name", "confidence": 0.85, "reasoning": "brief explanation of why you chose this category"}`;
+
+    console.log('Sending request to Groq...');
+    
+    const response = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
       messages: [
         {
-          role: 'system', 
-          content: 'You are an expert email classifier. Respond only with valid JSON.'
+          role: 'system',
+          content: 'You are an expert email classifier. You analyze emails carefully and provide accurate categorization. Respond only with valid JSON.'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.1,
+      max_tokens: 200
+    });
+
+    console.log('Groq response received:', response.choices[0].message.content);
+
+    let result;
+    try {
+      result = JSON.parse(response.choices[0].message.content);
+    } catch (parseError) {
+      console.error('JSON parse failed:', parseError);
+      // Try to extract JSON from the response
+      const jsonMatch = response.choices[0].message.content.match(/\{.*\}/s);
+      if (jsonMatch) {
+        result = JSON.parse(jsonMatch[0]);
+      } else {
+        throw new Error('Invalid JSON response from AI');
+      }
+    }
+    
+    res.json({
+      success: true,
+      category: result.category,
+      confidence: result.confidence,
+      reasoning: result.reasoning,
+      provider: 'groq',
+      model: 'llama-3.1-8b-instant',
+      processedAt: new Date().toISOString()
+    });
+
+  } catch (error) {
+    console.error('Groq categorization failed:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to categorize email with Groq',
+      details: error.message,
+      suggestion: 'Check your GROQ_API_KEY and try again'
+    });
+  }
+});
+
+// Calculate urgency score with Groq AI
+router.post('/urgency', async (req, res) => {
+  try {
+    const { subject, from, snippet } = req.body;
+
+    if (!subject && !snippet) {
+      return res.status(400).json({ 
+        error: 'Email subject or snippet required' 
+      });
+    }
+
+    if (!groq) {
+      return res.json({
+        success: false,
+        error: 'Groq not configured'
+      });
+    }
+
+    const prompt = `Analyze this email and rate its urgency on a scale of 0-10:
+
+Email Details:
+Subject: ${subject || 'No subject'}
+From: ${from || 'Unknown'}
+Content: ${snippet || 'No content'}
+
+Urgency Scale:
+0-2: Low (newsletters, routine updates)
+3-4: Medium (regular work tasks, non-urgent requests)
+5-6: High (tasks with near-term deadlines, important meetings)
+7-8: Urgent (same-day deadlines, important issues)
+9-10: Critical (true emergencies, immediate action required)
+
+Consider:
+- Time sensitivity (deadlines, meeting times)
+- Sender importance
+- Impact of delay
+- Context and tone
+
+Respond ONLY with valid JSON:
+{"urgencyScore": 4, "level": "medium", "reasoning": "explanation for the score"}`;
+
+    const response = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are an email urgency analyzer. Provide accurate urgency scoring based on context.'
         },
         {
           role: 'user',
@@ -99,75 +192,11 @@ router.post('/categorize', async (req, res) => {
     
     res.json({
       success: true,
-      ...result,
-      processedAt: new Date().toISOString()
-    });
-
-  } catch (error) {
-    console.error('Categorization failed:', error);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to categorize email',
-      details: error.message 
-    });
-  }
-});
-
-// Calculate urgency score
-router.post('/urgency', async (req, res) => {
-  try {
-    const { subject, from, snippet } = req.body;
-
-    if (!subject && !snippet) {
-      return res.status(400).json({ 
-        error: 'Email subject or snippet required' 
-      });
-    }
-
-    // Rule-based urgency scoring
-    let score = 0;
-    const text = `${subject || ''} ${snippet || ''}`.toLowerCase();
-
-    // Check for urgent keywords
-    const urgentWords = ['urgent', 'asap', 'immediate', 'emergency', 'deadline', 'today', 'now', 'critical'];
-    urgentWords.forEach(word => {
-      if (text.includes(word)) score += 2;
-    });
-
-    // Check sender importance (basic example)
-    if (from) {
-      const fromLower = from.toLowerCase();
-      if (fromLower.includes('boss') || fromLower.includes('ceo') || fromLower.includes('director') || fromLower.includes('manager')) {
-        score += 3;
-      }
-    }
-
-    // Meeting urgency
-    if (text.includes('meeting') && (text.includes('today') || text.includes('tomorrow'))) {
-      score += 2;
-    }
-
-    // Financial terms
-    if (text.includes('invoice') || text.includes('payment') || text.includes('overdue') || text.includes('bill')) {
-      score += 2;
-    }
-
-    // Time sensitivity
-    if (text.includes('deadline') || text.includes('due date') || text.includes('expires')) {
-      score += 1;
-    }
-
-    // Cap at 10
-    score = Math.min(score, 10);
-
-    res.json({
-      success: true,
-      urgencyScore: score,
-      level: score >= 8 ? 'critical' : 
-             score >= 6 ? 'high' : 
-             score >= 4 ? 'medium' : 'low',
-      isUrgent: score >= 7,
-      reasoning: `Analyzed keywords, sender, and context. Keywords found: ${urgentWords.filter(word => text.includes(word)).join(', ') || 'none'}`,
+      urgencyScore: result.urgencyScore,
+      level: result.level,
+      isUrgent: result.urgencyScore >= 7,
+      reasoning: result.reasoning,
+      provider: 'groq',
       processedAt: new Date().toISOString()
     });
 
@@ -181,7 +210,7 @@ router.post('/urgency', async (req, res) => {
   }
 });
 
-// Generate email response
+// Generate email response with Groq
 router.post('/respond', async (req, res) => {
   try {
     const { subject, from, snippet, responseType = 'acknowledgment' } = req.body;
@@ -192,42 +221,36 @@ router.post('/respond', async (req, res) => {
       });
     }
 
-    // Mock response if no OpenAI
-    if (!openai) {
-      const mockResponses = {
-        acknowledgment: 'Thank you for your email. I have received it and will respond shortly.',
-        meeting: 'Thank you for the meeting invitation. I will check my calendar and get back to you.',
-        urgent: 'I understand this is urgent. I will prioritize this and respond as soon as possible.',
-        general: 'Thank you for reaching out. I will review your message and respond accordingly.'
-      };
-      
+    if (!groq) {
       return res.json({
-        success: true,
-        response: mockResponses[responseType] || mockResponses.general,
-        responseType,
-        note: 'Mock response (OpenAI not configured)',
-        generatedAt: new Date().toISOString()
+        success: false,
+        error: 'Groq not configured'
       });
     }
 
-    const prompt = `
-    Generate a professional email response for:
-    
-    Original Subject: ${subject || 'No subject'}
-    From: ${from || 'Unknown sender'}
-    Content: ${snippet || 'No content'}
-    
-    Response type: ${responseType}
-    
-    Generate a concise, professional response (under 100 words).
-    `;
+    const prompt = `Generate a professional email response for this email:
 
-    const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+Original Email:
+Subject: ${subject || 'No subject'}
+From: ${from || 'Unknown sender'}
+Content: ${snippet || 'No content'}
+
+Response Type: ${responseType}
+
+Instructions:
+- Keep it professional and concise (under 100 words)
+- Match the tone appropriately
+- Address the main points
+- Be helpful and clear
+
+Generate only the email response text:`;
+
+    const response = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
       messages: [
         {
           role: 'system',
-          content: 'You are a professional email assistant. Generate polite, concise email responses.'
+          content: 'You are a professional email assistant. Generate appropriate, concise email responses.'
         },
         {
           role: 'user',
@@ -238,12 +261,13 @@ router.post('/respond', async (req, res) => {
       max_tokens: 200
     });
 
-    const generatedResponse = response.choices[0].message.content;
+    const generatedResponse = response.choices[0].message.content.trim();
 
     res.json({
       success: true,
       response: generatedResponse,
       responseType,
+      provider: 'groq',
       generatedAt: new Date().toISOString()
     });
 
@@ -257,23 +281,41 @@ router.post('/respond', async (req, res) => {
   }
 });
 
-// Process emails from Gmail with AI
-router.post('/process-gmail', async (req, res) => {
+// Debug endpoint for testing Groq connection
+router.get('/debug-groq', async (req, res) => {
   try {
-    // This endpoint will integrate with Gmail to fetch and process emails
-    const { maxEmails = 5 } = req.body;
-    
+    if (!groq) {
+      return res.json({
+        success: false,
+        error: 'Groq not initialized',
+        hasApiKey: !!process.env.GROQ_API_KEY
+      });
+    }
+
+    const response = await groq.chat.completions.create({
+      model: 'llama3-8b-8192',
+      messages: [
+        {
+          role: 'user',
+          content: 'Say "Groq API test successful!"'
+        }
+      ],
+      max_tokens: 20
+    });
+
     res.json({
       success: true,
-      message: 'Gmail + AI processing endpoint ready',
-      note: 'Will fetch emails from Gmail and process with AI',
-      maxEmails
+      message: 'Groq API working perfectly!',
+      response: response.choices[0].message.content,
+      model: response.model,
+      usage: response.usage
     });
+
   } catch (error) {
-    res.status(500).json({ 
+    res.json({
       success: false,
-      error: 'Processing failed',
-      details: error.message 
+      error: error.message,
+      hasApiKey: !!process.env.GROQ_API_KEY
     });
   }
 });

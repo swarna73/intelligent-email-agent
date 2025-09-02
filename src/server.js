@@ -13,10 +13,28 @@ class EmailAgentServer {
   }
 
   setupMiddleware() {
-    this.app.use(helmet());
+    // Configure helmet with relaxed CSP for development
+    this.app.use(helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'", "'unsafe-inline'"], // Allow inline scripts
+          styleSrc: ["'self'", "'unsafe-inline'"],  // Allow inline styles
+          imgSrc: ["'self'", "data:", "https:"],
+          connectSrc: ["'self'"]
+        }
+      }
+    }));
+    
     this.app.use(cors());
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true }));
+    
+    // Add request logging
+    this.app.use((req, res, next) => {
+      console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+      next();
+    });
   }
 
   setupRoutes() {
@@ -30,7 +48,47 @@ class EmailAgentServer {
       });
     });
 
-    // Main dashboard
+    // Gmail routes
+    try {
+      const gmailRoutes = require('./routes/gmail');
+      this.app.use('/api/gmail', gmailRoutes);
+      console.log('✅ Gmail routes loaded successfully');
+    } catch (error) {
+      console.log('⚠️ Gmail routes failed to load:', error.message);
+    }
+
+    // AI agent routes with debugging
+    try {
+      const agentRoutes = require('./routes/agent');
+      this.app.use('/api/agent', agentRoutes);
+      console.log('✅ AI agent routes loaded successfully');
+    } catch (error) {
+      console.log('❌ AI agent routes failed to load:', error.message);
+    }
+
+    // Debug route to show all available endpoints
+    this.app.get('/api/routes', (req, res) => {
+      res.json({
+        success: true,
+        message: 'All available routes',
+        routes: {
+          gmail: [
+            'GET /api/gmail/auth - Start OAuth',
+            'GET /api/gmail/test - Test connection', 
+            'GET /api/gmail/emails - Fetch emails'
+          ],
+          agent: [
+            'GET /api/agent/test - Test AI',
+            'POST /api/agent/categorize - Categorize email',
+            'POST /api/agent/urgency - Calculate urgency',
+            'POST /api/agent/respond - Generate response'
+          ]
+        },
+        timestamp: new Date().toISOString()
+      });
+    });
+
+    // Main dashboard with working JavaScript
     this.app.get('/', (req, res) => {
       const hasOpenAI = !!process.env.OPENAI_API_KEY;
       const hasGoogleAuth = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
@@ -40,6 +98,7 @@ class EmailAgentServer {
         <html>
         <head>
           <title>🤖 Intelligent Email Agent</title>
+          <meta charset="utf-8">
           <style>
             body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 40px; background: #f5f5f5; }
             .container { max-width: 800px; margin: 0 auto; background: white; padding: 40px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
@@ -51,8 +110,16 @@ class EmailAgentServer {
             .btn { display: inline-block; padding: 12px 24px; margin: 8px; background: #007bff; color: white; text-decoration: none; border-radius: 6px; font-weight: 500; }
             .btn:hover { background: #0056b3; }
             .btn.secondary { background: #6c757d; }
-            .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 30px 0; }
-            .feature { background: #f8f9fa; padding: 20px; border-radius: 8px; border-left: 4px solid #007bff; }
+            .form-group { margin: 15px 0; }
+            .form-control { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; }
+            textarea.form-control { height: 80px; resize: vertical; }
+            .btn-primary { background: #007bff; color: white; padding: 12px 24px; border: none; border-radius: 6px; font-weight: 500; cursor: pointer; }
+            .btn-primary:hover { background: #0056b3; }
+            .result-box { margin-top: 20px; padding: 20px; background: #f8f9fa; border-radius: 8px; border-left: 4px solid #007bff; display: none; }
+            .result-box.success { border-left-color: #28a745; background: #d4edda; }
+            .result-box.error { border-left-color: #dc3545; background: #f8d7da; }
+            pre { background: white; padding: 15px; border-radius: 4px; overflow-x: auto; font-size: 12px; }
+            .loading { color: #007bff; font-style: italic; }
           </style>
         </head>
         <body>
@@ -66,69 +133,136 @@ class EmailAgentServer {
                 <li>OpenAI API: <span class="status ${hasOpenAI ? 'good' : 'bad'}">${hasOpenAI ? '✅ Connected' : '❌ Missing'}</span></li>
                 <li>Google OAuth: <span class="status ${hasGoogleAuth ? 'good' : 'bad'}">${hasGoogleAuth ? '✅ Configured' : '❌ Missing'}</span></li>
               </ul>
-              ${!hasOpenAI || !hasGoogleAuth ? '<p><strong>⚠️ Configure missing API keys in your .env file to unlock all features</strong></p>' : ''}
-            </div>
-
-            <div class="feature-grid">
-              <div class="feature">
-                <h4>📧 Gmail Integration</h4>
-                <p>Connect your Gmail account to fetch and analyze emails</p>
-              </div>
-              <div class="feature">
-                <h4>🎯 Smart Categorization</h4>
-                <p>AI automatically sorts emails into work, personal, urgent, etc.</p>
-              </div>
-              <div class="feature">
-                <h4>⚡ Urgency Detection</h4>
-                <p>Intelligent scoring system identifies high-priority emails</p>
-              </div>
-              <div class="feature">
-                <h4>✍️ Auto-Responses</h4>
-                <p>Generate professional email replies with AI assistance</p>
-              </div>
             </div>
 
             <div class="buttons">
               <h3>🚀 Quick Actions</h3>
-              ${hasGoogleAuth ? '<a href="/api/gmail/auth" class="btn">📧 Connect Gmail</a>' : ''}
-              <a href="/api/gmail/test" class="btn secondary">🔍 Test Gmail Connection</a>
-              <a href="/api/gmail/emails" class="btn secondary">📥 View Recent Emails</a>
-              <a href="/health" class="btn secondary">❤️ Health Check</a>
+              <a href="/api/gmail/test" class="btn secondary" target="_blank">🔍 Test Gmail</a>
+              <a href="/api/gmail/emails" class="btn secondary" target="_blank">📥 Get Emails</a>
+              <a href="/api/agent/test" class="btn secondary" target="_blank">🤖 Test AI Agent</a>
+              <a href="/api/routes" class="btn secondary" target="_blank">📋 Show All Routes</a>
             </div>
 
             <div class="api-section">
-              <h3>🛠 Developer API Endpoints</h3>
-              <ul>
-                <li><code>GET /api/gmail/emails</code> - Fetch recent emails</li>
-                <li><code>POST /api/agent/categorize</code> - Categorize single email</li>
-                <li><code>POST /api/agent/urgency</code> - Calculate urgency score</li>
-                <li><code>POST /api/agent/respond</code> - Generate email response</li>
-                <li><code>POST /api/agent/process-batch</code> - Process multiple emails</li>
-              </ul>
+              <h3>🧪 Test AI Email Categorization</h3>
+              <p>Try categorizing an email with AI:</p>
+              
+              <form id="categorizeForm">
+                <div class="form-group">
+                  <input type="text" id="subject" class="form-control" placeholder="Email subject (e.g., 'URGENT: Meeting moved to tomorrow')" required>
+                </div>
+                <div class="form-group">
+                  <input type="email" id="from" class="form-control" placeholder="From email (e.g., 'boss@company.com')">
+                </div>
+                <div class="form-group">
+                  <textarea id="snippet" class="form-control" placeholder="Email content (e.g., 'Please confirm you can attend the emergency meeting...')" required></textarea>
+                </div>
+                <button type="submit" class="btn-primary">🎯 Categorize with AI</button>
+              </form>
+              
+              <div id="result" class="result-box"></div>
+            </div>
+
+            <div class="api-section">
+              <h3>📊 Sample Test Data</h3>
+              <p>Click to auto-fill the form with test data:</p>
+              <button type="button" onclick="fillUrgentExample()" class="btn secondary">⚡ Urgent Email</button>
+              <button type="button" onclick="fillMeetingExample()" class="btn secondary">📅 Meeting Email</button>
+              <button type="button" onclick="fillNewsletterExample()" class="btn secondary">📰 Newsletter</button>
             </div>
           </div>
+
+          <script>
+            // Form submission handler
+            document.getElementById('categorizeForm').addEventListener('submit', async function(e) {
+              e.preventDefault();
+              
+              const subject = document.getElementById('subject').value;
+              const from = document.getElementById('from').value;
+              const snippet = document.getElementById('snippet').value;
+              const resultDiv = document.getElementById('result');
+              
+              // Show loading state
+              resultDiv.style.display = 'block';
+              resultDiv.className = 'result-box';
+              resultDiv.innerHTML = '<div class="loading">🤖 AI is analyzing your email...</div>';
+              
+              try {
+                console.log('Sending request to /api/agent/categorize');
+                
+                const response = await fetch('/api/agent/categorize', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json'
+                  },
+                  body: JSON.stringify({
+                    subject: subject,
+                    from: from,
+                    snippet: snippet
+                  })
+                });
+                
+                console.log('Response status:', response.status);
+                const data = await response.json();
+                console.log('Response data:', data);
+                
+                if (data.success) {
+                  resultDiv.className = 'result-box success';
+                  resultDiv.innerHTML = \`
+                    <h4>✅ Email Categorized Successfully!</h4>
+                    <p><strong>Category:</strong> \${data.category.toUpperCase()}</p>
+                    <p><strong>Confidence:</strong> \${Math.round(data.confidence * 100)}%</p>
+                    <p><strong>Reasoning:</strong> \${data.reasoning}</p>
+                    <details>
+                      <summary>Full Response</summary>
+                      <pre>\${JSON.stringify(data, null, 2)}</pre>
+                    </details>
+                  \`;
+                } else {
+                  resultDiv.className = 'result-box error';
+                  resultDiv.innerHTML = \`
+                    <h4>❌ Categorization Failed</h4>
+                    <p><strong>Error:</strong> \${data.error}</p>
+                    <pre>\${JSON.stringify(data, null, 2)}</pre>
+                  \`;
+                }
+                
+              } catch (error) {
+                console.error('Request failed:', error);
+                resultDiv.className = 'result-box error';
+                resultDiv.innerHTML = \`
+                  <h4>❌ Request Failed</h4>
+                  <p><strong>Error:</strong> \${error.message}</p>
+                  <p>Check the browser console for more details.</p>
+                \`;
+              }
+            });
+            
+            // Sample data functions
+            function fillUrgentExample() {
+              document.getElementById('subject').value = 'URGENT: Project deadline moved to tomorrow';
+              document.getElementById('from').value = 'manager@company.com';
+              document.getElementById('snippet').value = 'Hi team, due to client feedback, we need to deliver the final presentation tomorrow morning instead of next week. Please confirm you can make the changes tonight.';
+            }
+            
+            function fillMeetingExample() {
+              document.getElementById('subject').value = 'Team meeting next Tuesday at 2pm';
+              document.getElementById('from').value = 'hr@company.com';
+              document.getElementById('snippet').value = 'Please join us for the weekly team sync. We will discuss project updates and next quarter planning.';
+            }
+            
+            function fillNewsletterExample() {
+              document.getElementById('subject').value = 'Weekly Tech News - AI Breakthroughs';
+              document.getElementById('from').value = 'newsletter@techdigest.com';
+              document.getElementById('snippet').value = 'This week in technology: Major AI developments, new programming frameworks, and startup funding news.';
+            }
+            
+            console.log('Email Agent Dashboard loaded successfully');
+          </script>
         </body>
         </html>
       `);
     });
-
-    // Gmail routes
-    try {
-      const gmailRoutes = require('./routes/gmail');
-      this.app.use('/api/gmail', gmailRoutes);
-      console.log('✅ Gmail routes loaded');
-    } catch (error) {
-      console.log('⚠️ Gmail routes not loaded:', error.message);
-    }
-
-    // AI agent routes  
-    try {
-      const agentRoutes = require('./routes/agent');
-      this.app.use('/api/agent', agentRoutes);
-      console.log('✅ AI agent routes loaded');
-    } catch (error) {
-      console.log('⚠️ AI agent routes not loaded:', error.message);
-    }
 
     // API documentation endpoint
     this.app.get('/api', (req, res) => {
@@ -142,10 +276,10 @@ class EmailAgentServer {
             'GET /api/gmail/emails': 'Fetch recent emails'
           },
           agent: {
+            'GET /api/agent/test': 'Test AI agent status',
             'POST /api/agent/categorize': 'Categorize single email',
             'POST /api/agent/urgency': 'Calculate urgency score',
-            'POST /api/agent/respond': 'Generate email response',
-            'POST /api/agent/process-batch': 'Process multiple emails'
+            'POST /api/agent/respond': 'Generate email response'
           }
         }
       });
@@ -153,9 +287,12 @@ class EmailAgentServer {
 
     // 404 handler
     this.app.use((req, res) => {
+      console.log(`404 - ${req.method} ${req.path}`);
       res.status(404).json({ 
         error: 'Endpoint not found',
-        availableEndpoints: ['/health', '/api', '/api/gmail/auth', '/api/agent/categorize']
+        requestedPath: req.path,
+        method: req.method,
+        suggestion: 'Visit /api/routes to see all available endpoints'
       });
     });
   }
@@ -178,18 +315,8 @@ class EmailAgentServer {
       console.log(`🚀 Server: http://localhost:${this.port}`);
       console.log(`📊 Health: http://localhost:${this.port}/health`);
       console.log(`📡 API: http://localhost:${this.port}/api`);
+      console.log(`📋 Routes: http://localhost:${this.port}/api/routes`);
       console.log('=================================\n');
-      
-      // Status checks
-      if (!process.env.OPENAI_API_KEY) {
-        console.log('⚠️  Warning: OPENAI_API_KEY not set - AI features disabled');
-      }
-      if (!process.env.GOOGLE_CLIENT_ID) {
-        console.log('⚠️  Warning: GOOGLE_CLIENT_ID not set - Gmail integration disabled');
-      }
-      if (process.env.OPENAI_API_KEY && process.env.GOOGLE_CLIENT_ID) {
-        console.log('✅ All systems ready! Visit the dashboard to get started.');
-      }
     });
   }
 }
